@@ -3,13 +3,19 @@
   'use strict';
 
   var W = 400, H = 640;
-  var GRAVITY = 0.32;
-  var BUBBLE_LIFT = -0.11;
-  var DAMP = 0.999;
+  // feel settings (tunable from tools/feel.js)
+  var C = {
+    gravity: 0.27,      // px / frame^2
+    bubbleLift: -0.11,
+    damp: 0.999,        // berry air drag per frame
+    nodeDamp: 0.985,    // drag on the visible rope pieces
+    spring: 0.06,       // rope pull per px of stretch (bungee feel)
+    springDamp: 0.2,    // damping of the stretch/bounce
+    maxStretch: 1.35,   // hard limit on how far a rope can stretch
+    iter: 12
+  };
   var BERRY_R = 16;
-  var BERRY_INV_MASS = 0.15;
   var SEG_LEN = 14;
-  var ITER = 24;
   var STAR_R = 22;
   var BUBBLE_R = 24;
   var GOAL_R = 40;
@@ -26,12 +32,13 @@
     this.frame = 0;
     this.state = 'play'; // play | won | lost
     this.loseReason = '';
-    this.berry = new Node(level.berry.x, level.berry.y, BERRY_INV_MASS);
+    this.berry = new Node(level.berry.x, level.berry.y, 0);
     if (level.berry.vx || level.berry.vy) {
       this.berry.px -= level.berry.vx || 0;
       this.berry.py -= level.berry.vy || 0;
     }
     this.bubbled = false;
+    this.angle = 0; this.spin = 0;
     this.ropes = [];
     this.autoRopes = (level.autoRopes || []).map(function (a) {
       return { x: a.x, y: a.y, r: a.r, used: false };
@@ -62,21 +69,20 @@
       var t = i / n;
       // a little sag so slack ropes look slack
       var sag = Math.max(0, len - dist) * 0.5 * Math.sin(Math.PI * t);
-      nodes.push(new Node(ax + dx * t, ay + dy * t + sag, 5));
+      nodes.push(new Node(ax + dx * t, ay + dy * t + sag, 1));
     }
     nodes.push(b);
     var links = [];
     for (var j = 0; j < n; j++) links.push({ a: j, b: j + 1, rest: rest, on: true });
-    this.ropes.push({ nodes: nodes, links: links, attached: true, ax: ax, ay: ay });
+    this.ropes.push({ nodes: nodes, links: links, attached: true, ax: ax, ay: ay, len: len });
     this.events.push({ type: 'rope' });
     return this.ropes.length - 1;
   };
 
   World.prototype.cutLink = function (rope, k) {
     if (!rope.attached) return false;
+    // the piece on the pin side dangles from the pin, the other piece trails from the berry
     rope.links[k].on = false;
-    // detach the berry-side piece so it falls away
-    rope.links[rope.links.length - 1].on = false;
     rope.attached = false;
     this.events.push({ type: 'cut' });
     return true;
@@ -163,25 +169,48 @@
     var b = this.berry;
     var i, k, r;
 
-    // integrate rope nodes
+    // rope tension: each attached rope is a bungee from its pin to the berry
+    var fx = 0, fy = 0;
+    var bvx = b.x - b.px, bvy = b.y - b.py;
+    for (i = 0; i < this.ropes.length; i++) {
+      r = this.ropes[i];
+      if (!r.attached) continue;
+      var tx = b.x - r.ax, ty = b.y - r.ay;
+      var td = Math.sqrt(tx * tx + ty * ty);
+      if (td <= r.len || td === 0) continue;
+      var nx = tx / td, ny = ty / td;
+      var vn = bvx * nx + bvy * ny;
+      var f = C.spring * (td - r.len) + (vn > 0 ? C.springDamp * vn : 0);
+      fx -= nx * f; fy -= ny * f;
+    }
+    // integrate berry
+    var damp = this.bubbled ? 0.97 : C.damp;
+    bvx *= damp; bvy *= damp;
+    b.px = b.x; b.py = b.y;
+    b.x += bvx + fx; b.y += bvy + fy + (this.bubbled ? C.bubbleLift : C.gravity);
+    // never let a rope stretch past its limit
+    for (i = 0; i < this.ropes.length; i++) {
+      r = this.ropes[i];
+      if (!r.attached) continue;
+      var mx = b.x - r.ax, my = b.y - r.ay, md = Math.sqrt(mx * mx + my * my), lim = r.len * C.maxStretch;
+      if (md > lim) { b.x = r.ax + mx / md * lim; b.y = r.ay + my / md * lim; }
+    }
+    // spin: the berry tumbles with its sideways motion
+    this.spin = this.spin * 0.96 + (b.x - b.px) * 0.004;
+    this.angle += this.spin;
+
+    // visible rope pieces (pinned at the pin and/or the berry, don't push the berry)
     for (i = 0; i < this.ropes.length; i++) {
       r = this.ropes[i];
       for (k = 0; k < r.nodes.length; k++) {
         var n = r.nodes[k];
-        if (n === b || n.inv === 0) continue;
-        var vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
+        if (n.inv === 0) continue;
+        var vx = (n.x - n.px) * C.nodeDamp, vy = (n.y - n.py) * C.nodeDamp;
         n.px = n.x; n.py = n.y;
-        n.x += vx; n.y += vy + GRAVITY;
+        n.x += vx; n.y += vy + C.gravity;
       }
     }
-    // integrate berry
-    var damp = this.bubbled ? 0.97 : DAMP;
-    var bvx = (b.x - b.px) * damp, bvy = (b.y - b.py) * damp;
-    b.px = b.x; b.py = b.y;
-    b.x += bvx; b.y += bvy + (this.bubbled ? BUBBLE_LIFT : GRAVITY);
-
-    // constraints (ropes only resist stretching)
-    for (var it = 0; it < ITER; it++) {
+    for (var it = 0; it < C.iter; it++) {
       for (i = 0; i < this.ropes.length; i++) {
         r = this.ropes[i];
         for (k = 0; k < r.links.length; k++) {
@@ -289,7 +318,7 @@
   }
 
   var api = {
-    W: W, H: H, World: World, simulate: simulate,
+    W: W, H: H, World: World, simulate: simulate, C: C,
     BERRY_R: BERRY_R, STAR_R: STAR_R, BUBBLE_R: BUBBLE_R, GOAL_R: GOAL_R
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

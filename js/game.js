@@ -252,19 +252,26 @@
   }
 
   function drawRopes() {
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     world.ropes.forEach(function (r) {
-      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-      [['#5c3a1a', 5], ['#d6a86a', 3]].forEach(function (st) {
-        ctx.strokeStyle = st[0]; ctx.lineWidth = st[1];
-        ctx.beginPath();
-        var drawing = false;
-        r.links.forEach(function (L) {
-          var a = r.nodes[L.a], b = r.nodes[L.b];
-          if (!L.on) { drawing = false; return; }
-          if (!drawing) { ctx.moveTo(a.x, a.y); drawing = true; }
-          ctx.lineTo(b.x, b.y);
-        });
-        ctx.stroke();
+      // dark outline
+      ctx.strokeStyle = '#4a2e14'; ctx.lineWidth = 6;
+      ctx.beginPath();
+      var drawing = false;
+      r.links.forEach(function (L) {
+        var a = r.nodes[L.a], b = r.nodes[L.b];
+        if (!L.on) { drawing = false; return; }
+        if (!drawing) { ctx.moveTo(a.x, a.y); drawing = true; }
+        ctx.lineTo(b.x, b.y);
+      });
+      ctx.stroke();
+      // twisted look: alternate two tones per segment
+      ctx.lineWidth = 3.5;
+      r.links.forEach(function (L, k) {
+        if (!L.on) return;
+        var a = r.nodes[L.a], b = r.nodes[L.b];
+        ctx.strokeStyle = k % 2 ? '#e8c38a' : '#b98448';
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       });
     });
   }
@@ -472,9 +479,9 @@
       if (world.state === 'won') {
         // shrink into the beak
         var k = Math.max(0, 1 - endTimer / 6);
-        ctx.save(); ctx.translate(b.x, b.y); ctx.scale(k, k); drawBerry(0, 0); ctx.restore();
+        ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(world.angle); ctx.scale(k, k); drawBerry(0, 0); ctx.restore();
       } else if (!(world.state === 'lost' && world.loseReason === 'spikes')) {
-        drawBerry(b.x, b.y);
+        ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(world.angle); drawBerry(0, 0); ctx.restore();
       }
     }
     if (world.bubbled && world.state === 'play') drawBubble(b.x, b.y, 27, 0);
