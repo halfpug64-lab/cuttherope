@@ -1,0 +1,297 @@
+// Snip & Drop - physics engine (no DOM, so it also runs in Node for level tests)
+(function (root) {
+  'use strict';
+
+  var W = 400, H = 640;
+  var GRAVITY = 0.32;
+  var BUBBLE_LIFT = -0.11;
+  var DAMP = 0.999;
+  var BERRY_R = 16;
+  var BERRY_INV_MASS = 0.15;
+  var SEG_LEN = 14;
+  var ITER = 24;
+  var STAR_R = 22;
+  var BUBBLE_R = 24;
+  var GOAL_R = 40;
+  var BLOW_RANGE = 320;
+  var BLOW_CONE = Math.cos(38 * Math.PI / 180);
+  var BLOW_POWER = 7;
+
+  function Node(x, y, inv) {
+    this.x = x; this.y = y; this.px = x; this.py = y; this.inv = inv;
+  }
+
+  function World(level) {
+    this.level = level;
+    this.frame = 0;
+    this.state = 'play'; // play | won | lost
+    this.loseReason = '';
+    this.berry = new Node(level.berry.x, level.berry.y, BERRY_INV_MASS);
+    if (level.berry.vx || level.berry.vy) {
+      this.berry.px -= level.berry.vx || 0;
+      this.berry.py -= level.berry.vy || 0;
+    }
+    this.bubbled = false;
+    this.ropes = [];
+    this.autoRopes = (level.autoRopes || []).map(function (a) {
+      return { x: a.x, y: a.y, r: a.r, used: false };
+    });
+    this.bubbles = (level.bubbles || []).map(function (b) { return { x: b.x, y: b.y, taken: false }; });
+    this.spikes = (level.spikes || []).slice();
+    this.blowers = (level.blowers || []).map(function (b) {
+      var a = b.angle * Math.PI / 180;
+      return { x: b.x, y: b.y, angle: b.angle, dx: Math.cos(a), dy: Math.sin(a), puff: 0 };
+    });
+    this.stars = (level.stars || []).map(function (s) { return { x: s.x, y: s.y, got: false, t: 0 }; });
+    this.goal = { x: level.goal.x, y: level.goal.y };
+    this.collected = 0;
+    this.events = [];
+    var self = this;
+    (level.ropes || []).forEach(function (r) { self.addRope(r.x, r.y, r.len); });
+  }
+
+  World.prototype.addRope = function (ax, ay, len) {
+    var b = this.berry;
+    var dx = b.x - ax, dy = b.y - ay;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (!len) len = dist;
+    var n = Math.max(3, Math.round(len / SEG_LEN));
+    var rest = len / n;
+    var nodes = [new Node(ax, ay, 0)];
+    for (var i = 1; i < n; i++) {
+      var t = i / n;
+      // a little sag so slack ropes look slack
+      var sag = Math.max(0, len - dist) * 0.5 * Math.sin(Math.PI * t);
+      nodes.push(new Node(ax + dx * t, ay + dy * t + sag, 5));
+    }
+    nodes.push(b);
+    var links = [];
+    for (var j = 0; j < n; j++) links.push({ a: j, b: j + 1, rest: rest, on: true });
+    this.ropes.push({ nodes: nodes, links: links, attached: true, ax: ax, ay: ay });
+    this.events.push({ type: 'rope' });
+    return this.ropes.length - 1;
+  };
+
+  World.prototype.cutLink = function (rope, k) {
+    if (!rope.attached) return false;
+    rope.links[k].on = false;
+    // detach the berry-side piece so it falls away
+    rope.links[rope.links.length - 1].on = false;
+    rope.attached = false;
+    this.events.push({ type: 'cut' });
+    return true;
+  };
+
+  // cut rope by index (used by scripted solutions)
+  World.prototype.cutRope = function (i) {
+    var r = this.ropes[i];
+    if (!r) return false;
+    return this.cutLink(r, Math.floor(r.links.length / 2));
+  };
+
+  function segIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    var d = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+    if (d === 0) return false;
+    var u = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / d;
+    var v = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / d;
+    return u >= 0 && u <= 1 && v >= 0 && v <= 1;
+  }
+
+  // swipe from (x1,y1) to (x2,y2): cut any rope it crosses
+  World.prototype.swipe = function (x1, y1, x2, y2) {
+    var cut = false;
+    for (var i = 0; i < this.ropes.length; i++) {
+      var r = this.ropes[i];
+      if (!r.attached) continue;
+      for (var k = 0; k < r.links.length; k++) {
+        var L = r.links[k];
+        if (!L.on) continue;
+        var a = r.nodes[L.a], b = r.nodes[L.b];
+        if (segIntersect(x1, y1, x2, y2, a.x, a.y, b.x, b.y)) {
+          this.cutLink(r, k); cut = true; break;
+        }
+      }
+    }
+    return cut;
+  };
+
+  // tap at a point: pop bubble or fire blower
+  World.prototype.tap = function (x, y) {
+    if (this.bubbled) {
+      var dx = x - this.berry.x, dy = y - this.berry.y;
+      if (dx * dx + dy * dy < 40 * 40) { this.pop(); return true; }
+    }
+    for (var i = 0; i < this.blowers.length; i++) {
+      var bl = this.blowers[i];
+      var ex = x - bl.x, ey = y - bl.y;
+      if (ex * ex + ey * ey < 34 * 34) { this.blow(i); return true; }
+    }
+    return false;
+  };
+
+  World.prototype.pop = function () {
+    if (!this.bubbled) return false;
+    this.bubbled = false;
+    this.events.push({ type: 'pop', x: this.berry.x, y: this.berry.y });
+    return true;
+  };
+
+  World.prototype.blow = function (i) {
+    var bl = this.blowers[i];
+    if (!bl) return false;
+    bl.puff = 1;
+    this.events.push({ type: 'blow', i: i });
+    var vx = this.berry.x - bl.x, vy = this.berry.y - bl.y;
+    var d = Math.sqrt(vx * vx + vy * vy);
+    if (d > 0 && d < BLOW_RANGE && (vx * bl.dx + vy * bl.dy) / d > BLOW_CONE) {
+      var p = BLOW_POWER * (1 - 0.5 * d / BLOW_RANGE);
+      this.berry.px -= bl.dx * p;
+      this.berry.py -= bl.dy * p;
+    }
+    return true;
+  };
+
+  function circleRect(cx, cy, r, s) {
+    var nx = Math.max(s.x, Math.min(cx, s.x + s.w));
+    var ny = Math.max(s.y, Math.min(cy, s.y + s.h));
+    var dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  World.prototype.step = function () {
+    if (this.state !== 'play') { this.frame++; return; }
+    var b = this.berry;
+    var i, k, r;
+
+    // integrate rope nodes
+    for (i = 0; i < this.ropes.length; i++) {
+      r = this.ropes[i];
+      for (k = 0; k < r.nodes.length; k++) {
+        var n = r.nodes[k];
+        if (n === b || n.inv === 0) continue;
+        var vx = (n.x - n.px) * 0.99, vy = (n.y - n.py) * 0.99;
+        n.px = n.x; n.py = n.y;
+        n.x += vx; n.y += vy + GRAVITY;
+      }
+    }
+    // integrate berry
+    var damp = this.bubbled ? 0.97 : DAMP;
+    var bvx = (b.x - b.px) * damp, bvy = (b.y - b.py) * damp;
+    b.px = b.x; b.py = b.y;
+    b.x += bvx; b.y += bvy + (this.bubbled ? BUBBLE_LIFT : GRAVITY);
+
+    // constraints (ropes only resist stretching)
+    for (var it = 0; it < ITER; it++) {
+      for (i = 0; i < this.ropes.length; i++) {
+        r = this.ropes[i];
+        for (k = 0; k < r.links.length; k++) {
+          var L = r.links[k];
+          if (!L.on) continue;
+          var A = r.nodes[L.a], B = r.nodes[L.b];
+          var dx = B.x - A.x, dy = B.y - A.y;
+          var d = Math.sqrt(dx * dx + dy * dy);
+          if (d <= L.rest || d === 0) continue;
+          var wsum = A.inv + B.inv;
+          if (wsum === 0) continue;
+          var diff = (d - L.rest) / (d * wsum);
+          A.x += dx * diff * A.inv; A.y += dy * diff * A.inv;
+          B.x -= dx * diff * B.inv; B.y -= dy * diff * B.inv;
+        }
+      }
+    }
+
+    // auto ropes
+    for (i = 0; i < this.autoRopes.length; i++) {
+      var ar = this.autoRopes[i];
+      if (ar.used) continue;
+      var ex = b.x - ar.x, ey = b.y - ar.y;
+      if (ex * ex + ey * ey < ar.r * ar.r) {
+        ar.used = true;
+        this.addRope(ar.x, ar.y, Math.sqrt(ex * ex + ey * ey));
+      }
+    }
+
+    // bubbles
+    for (i = 0; i < this.bubbles.length; i++) {
+      var bu = this.bubbles[i];
+      if (bu.taken) continue;
+      var fx = b.x - bu.x, fy = b.y - bu.y;
+      if (fx * fx + fy * fy < (BUBBLE_R + BERRY_R) * (BUBBLE_R + BERRY_R)) {
+        bu.taken = true;
+        this.bubbled = true;
+        // slow down when caught
+        b.px = b.x - (b.x - b.px) * 0.3;
+        b.py = b.y - (b.y - b.py) * 0.3;
+        this.events.push({ type: 'bubble' });
+      }
+    }
+
+    // stars
+    for (i = 0; i < this.stars.length; i++) {
+      var s = this.stars[i];
+      if (s.got) continue;
+      var gx = b.x - s.x, gy = b.y - s.y;
+      if (gx * gx + gy * gy < (STAR_R + BERRY_R) * (STAR_R + BERRY_R)) {
+        s.got = true; this.collected++;
+        this.events.push({ type: 'star', x: s.x, y: s.y });
+      }
+    }
+
+    // spikes
+    for (i = 0; i < this.spikes.length; i++) {
+      if (circleRect(b.x, b.y, BERRY_R - 3, this.spikes[i])) {
+        this.state = 'lost'; this.loseReason = 'spikes';
+        this.events.push({ type: 'lose' });
+        break;
+      }
+    }
+
+    // goal
+    if (this.state === 'play') {
+      var hx = b.x - this.goal.x, hy = b.y - this.goal.y;
+      if (hx * hx + hy * hy < GOAL_R * GOAL_R) {
+        this.state = 'won';
+        this.events.push({ type: 'win' });
+      }
+    }
+
+    // out of bounds
+    if (this.state === 'play' && (b.y > H + 60 || b.y < -80 || b.x < -80 || b.x > W + 80)) {
+      this.state = 'lost'; this.loseReason = 'gone';
+      this.events.push({ type: 'lose' });
+    }
+
+    for (i = 0; i < this.blowers.length; i++) {
+      if (this.blowers[i].puff > 0) this.blowers[i].puff = Math.max(0, this.blowers[i].puff - 0.04);
+    }
+    this.frame++;
+  };
+
+  // run a scripted solution: [{t: frame, cut: i} | {t, pop: true} | {t, blow: i}]
+  function simulate(level, actions, maxFrames) {
+    var w = new World(level);
+    var acts = (actions || []).slice().sort(function (a, b) { return a.t - b.t; });
+    var ai = 0, path = [], near = 1e9, nearAt = null;
+    maxFrames = maxFrames || 1500;
+    while (w.state === 'play' && w.frame < maxFrames) {
+      while (ai < acts.length && acts[ai].t <= w.frame) {
+        var a = acts[ai++];
+        if (a.cut !== undefined) w.cutRope(a.cut);
+        if (a.pop) w.pop();
+        if (a.blow !== undefined) w.blow(a.blow);
+      }
+      w.step();
+      var gx = w.berry.x - w.goal.x, gy = w.berry.y - w.goal.y, gd = Math.sqrt(gx * gx + gy * gy);
+      if (gd < near) { near = gd; nearAt = [Math.round(w.berry.x), Math.round(w.berry.y), w.frame]; }
+      if (w.frame % 5 === 0) path.push([Math.round(w.berry.x), Math.round(w.berry.y), w.frame]);
+    }
+    return { state: w.state, reason: w.loseReason, stars: w.collected, frames: w.frame, path: path, near: near, nearAt: nearAt, world: w };
+  }
+
+  var api = {
+    W: W, H: H, World: World, simulate: simulate,
+    BERRY_R: BERRY_R, STAR_R: STAR_R, BUBBLE_R: BUBBLE_R, GOAL_R: GOAL_R
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.Engine = api;
+})(this);
