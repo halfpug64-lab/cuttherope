@@ -6,13 +6,15 @@
   // feel settings (tunable from tools/feel.js)
   var C = {
     gravity: 0.27,      // px / frame^2
-    bubbleLift: -0.11,
+    bubbleSpeed: 1.5,   // bubbles rise at a steady speed (px / frame)
+    bubbleGrip: 0.2,    // how fast a bubble settles to that speed
     damp: 0.999,        // berry air drag per frame
-    nodeDamp: 0.985,    // drag on the visible rope pieces
-    spring: 0.06,       // rope pull per px of stretch (bungee feel)
-    springDamp: 0.2,    // damping of the stretch/bounce
-    maxStretch: 1.35,   // hard limit on how far a rope can stretch
-    iter: 12
+    nodeDamp: 0.999,    // air drag on rope points
+    berryInv: 0.05,     // berry is the heavy end of the chain (rope points are 1)
+    stiff: 1,           // how hard each solver pass pulls a link back (lower = stretchier)
+    iter: 20,           // solver passes per frame (fewer = stretchier, bouncier)
+    maxStretch: 1.3,    // hard limit on how far a rope can stretch
+    align: 0.12         // how quickly the berry turns to hang along its rope
   };
   var BERRY_R = 16;
   var SEG_LEN = 14;
@@ -32,7 +34,7 @@
     this.frame = 0;
     this.state = 'play'; // play | won | lost
     this.loseReason = '';
-    this.berry = new Node(level.berry.x, level.berry.y, 0);
+    this.berry = new Node(level.berry.x, level.berry.y, C.berryInv);
     if (level.berry.vx || level.berry.vy) {
       this.berry.px -= level.berry.vx || 0;
       this.berry.py -= level.berry.vy || 0;
@@ -169,47 +171,30 @@
     var b = this.berry;
     var i, k, r;
 
-    // rope tension: each attached rope is a bungee from its pin to the berry
-    var fx = 0, fy = 0;
-    var bvx = b.x - b.px, bvy = b.y - b.py;
-    for (i = 0; i < this.ropes.length; i++) {
-      r = this.ropes[i];
-      if (!r.attached) continue;
-      var tx = b.x - r.ax, ty = b.y - r.ay;
-      var td = Math.sqrt(tx * tx + ty * ty);
-      if (td <= r.len || td === 0) continue;
-      var nx = tx / td, ny = ty / td;
-      var vn = bvx * nx + bvy * ny;
-      var f = C.spring * (td - r.len) + (vn > 0 ? C.springDamp * vn : 0);
-      fx -= nx * f; fy -= ny * f;
-    }
-    // integrate berry
-    var damp = this.bubbled ? 0.97 : C.damp;
-    bvx *= damp; bvy *= damp;
-    b.px = b.x; b.py = b.y;
-    b.x += bvx + fx; b.y += bvy + fy + (this.bubbled ? C.bubbleLift : C.gravity);
-    // never let a rope stretch past its limit
-    for (i = 0; i < this.ropes.length; i++) {
-      r = this.ropes[i];
-      if (!r.attached) continue;
-      var mx = b.x - r.ax, my = b.y - r.ay, md = Math.sqrt(mx * mx + my * my), lim = r.len * C.maxStretch;
-      if (md > lim) { b.x = r.ax + mx / md * lim; b.y = r.ay + my / md * lim; }
-    }
-    // spin: the berry tumbles with its sideways motion
-    this.spin = this.spin * 0.96 + (b.x - b.px) * 0.004;
-    this.angle += this.spin;
-
-    // visible rope pieces (pinned at the pin and/or the berry, don't push the berry)
+    // move every rope point and the berry
     for (i = 0; i < this.ropes.length; i++) {
       r = this.ropes[i];
       for (k = 0; k < r.nodes.length; k++) {
         var n = r.nodes[k];
-        if (n.inv === 0) continue;
+        if (n === b || n.inv === 0) continue;
         var vx = (n.x - n.px) * C.nodeDamp, vy = (n.y - n.py) * C.nodeDamp;
         n.px = n.x; n.py = n.y;
         n.x += vx; n.y += vy + C.gravity;
       }
     }
+    var bvx = (b.x - b.px) * C.damp, bvy = (b.y - b.py) * C.damp;
+    if (this.bubbled) {
+      // a bubble drifts up at a steady pace; sideways pushes fade out slowly
+      bvx *= 0.96;
+      bvy += (-C.bubbleSpeed - bvy) * C.bubbleGrip;
+    } else {
+      bvy += C.gravity;
+    }
+    b.px = b.x; b.py = b.y;
+    b.x += bvx; b.y += bvy;
+
+    // rope links: they only pull (slack rope can bunch up), and a few soft passes
+    // leave a little stretch in them, which gives the springy catch
     for (var it = 0; it < C.iter; it++) {
       for (i = 0; i < this.ropes.length; i++) {
         r = this.ropes[i];
@@ -220,14 +205,44 @@
           var dx = B.x - A.x, dy = B.y - A.y;
           var d = Math.sqrt(dx * dx + dy * dy);
           if (d <= L.rest || d === 0) continue;
-          var wsum = A.inv + B.inv;
+          // a cut-off piece still trails from the berry, but doesn't drag it around
+          var ia = A.inv, ib = (B === b && !r.attached) ? 0 : B.inv;
+          var wsum = ia + ib;
           if (wsum === 0) continue;
-          var diff = (d - L.rest) / (d * wsum);
-          A.x += dx * diff * A.inv; A.y += dy * diff * A.inv;
-          B.x -= dx * diff * B.inv; B.y -= dy * diff * B.inv;
+          var diff = C.stiff * (d - L.rest) / (d * wsum);
+          A.x += dx * diff * ia; A.y += dy * diff * ia;
+          B.x -= dx * diff * ib; B.y -= dy * diff * ib;
         }
       }
     }
+    // never let a rope stretch past its limit
+    for (i = 0; i < this.ropes.length; i++) {
+      r = this.ropes[i];
+      if (!r.attached) continue;
+      var mx = b.x - r.ax, my = b.y - r.ay, md = Math.sqrt(mx * mx + my * my), lim = r.len * C.maxStretch;
+      if (md > lim) { b.x = r.ax + mx / md * lim; b.y = r.ay + my / md * lim; }
+    }
+
+    // the berry hangs along its rope(s); when free it keeps tumbling
+    var ux = 0, uy = 0, held = 0;
+    for (i = 0; i < this.ropes.length; i++) {
+      r = this.ropes[i];
+      if (!r.attached) continue;
+      var pn = r.nodes[r.nodes.length - 2];
+      var ox = pn.x - b.x, oy = pn.y - b.y, ol = Math.sqrt(ox * ox + oy * oy) || 1;
+      ux += ox / ol; uy += oy / ol; held++;
+    }
+    if (held && (ux || uy)) {
+      // the berry's top (its leaves) points toward where the rope pulls
+      var want = Math.atan2(uy, ux) + Math.PI / 2;
+      var diffA = want - this.angle;
+      while (diffA > Math.PI) diffA -= Math.PI * 2;
+      while (diffA < -Math.PI) diffA += Math.PI * 2;
+      this.spin = this.spin * 0.8 + diffA * C.align;
+    } else {
+      this.spin *= 0.995;
+    }
+    this.angle += this.spin;
 
     // auto ropes
     for (i = 0; i < this.autoRopes.length; i++) {

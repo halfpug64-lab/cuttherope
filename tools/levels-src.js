@@ -81,7 +81,7 @@ module.exports = [
   { name: 'Crosswind', hint: 'Blowers push bubbles too.',
     berry: { x: 90, y: 520 }, bubbles: [{ x: 90, y: 520 }], ropes: [{ x: 90, y: 630, len: 110 }],
     blowers: [{ x: 20, y: 300, angle: 0 }], spikes: [{ x: 0, y: 0, w: 400, h: 18 }],
-    goal: { x: 310, y: 570 },
+    goal: { x: 350, y: 570 },
     solve: [{ cut: 0, t: [10, 40, 5] }, { blow: 0, t: [15, 300, 2] }, { pop: true, t: [20, 600, 3] }] },
 
   { name: 'Bubble Taxi', berry: { x: 80, y: 420 }, ropes: [{ x: 80, y: 330 }],
@@ -105,8 +105,8 @@ module.exports = [
   { name: 'Ping Pong', berry: { x: 200, y: 540 }, bubbles: [{ x: 200, y: 540 }],
     ropes: [{ x: 200, y: 640, len: 100 }],
     blowers: [{ x: 20, y: 400, angle: 0 }, { x: 380, y: 230, angle: 180 }],
-    spikes: [{ x: 0, y: 0, w: 400, h: 16 }, { x: 150, y: 300, w: 100, h: 16 }], goal: { x: 90, y: 560 },
-    solve: [{ cut: 0, t: [10, 30, 5] }, { blow: 0, t: [15, 200, 4] }, { blow: 1, t: [20, 400, 4] }, { pop: true, t: [30, 700, 4] }] },
+    spikes: [{ x: 0, y: 0, w: 400, h: 16 }, { x: 150, y: 300, w: 100, h: 16 }], goal: { x: 60, y: 560 },
+    solve: [{ cut: 0, t: [10, 30, 5] }, { blow: 0, t: [15, 200, 3] }, { blow: 1, t: [20, 400, 3] }, { pop: true, t: [30, 700, 3] }] },
 
   { name: 'Sky Hook', berry: { x: 330, y: 540 }, bubbles: [{ x: 330, y: 540 }],
     ropes: [{ x: 330, y: 630, len: 120 }], autoRopes: [{ x: 200, y: 150, r: 110 }],
@@ -125,6 +125,6 @@ module.exports = [
     bubbles: [{ x: 250, y: 470 }],
     blowers: [{ x: 380, y: 200, angle: 180 }],
     spikes: [{ x: 0, y: 0, w: 400, h: 14 }, { x: 0, y: 400, w: 190, h: 18 }],
-    goal: { x: 320, y: 300 },
+    goal: { x: 60, y: 300 },
     solve: [{ cut: 0, t: [0, 200, 3] }, { cut: 1, t: [5, 400, 3] }, { blow: 0, t: [10, 700, 5] }, { pop: true, t: [20, 800, 5] }] }
 ];
