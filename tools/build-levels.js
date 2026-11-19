@@ -1,16 +1,51 @@
 // Builds js/levels.js from tools/levels-src.js.
-// For each level it searches the solution timings, places fireflies along the
-// winning path (unless the level gives them), then re-checks the result.
-// Usage: node tools/build-levels.js [levelNumber]
+//
+// For each level it:
+//  1. searches the timing template (`solve`) for solutions that win,
+//  2. keeps the one whose tightest move has the most slack (a human can't hit
+//     an exact frame),
+//  3. places the fireflies only where the berry still passes when the player's
+//     timing is a bit early or late,
+//  4. fails the build if any move's timing window is below the minimum.
+//
+// Timing windows are measured like a player experiences them: moving one action
+// also moves every later action by the same amount. 60 frames = 1 second.
+//
+// Usage: node tools/build-levels.js [levelNumber]   (a single level is checked, not saved)
 'use strict';
 var fs = require('fs');
 var path = require('path');
 var Engine = require('../js/engine.js');
 var src = require('./levels-src.js');
 
+var MIN_WIN = 20;    // frames of slack needed on every move just to win (1/3 s)
+var MIN_STARS = 12;  // frames of slack needed on every move to also get all 3 fireflies (1/5 s)
+var CATCH = 24;      // a firefly must be this close to every nearby-timing path
+
 function expand(v) {
   if (Array.isArray(v)) { var o = []; for (var x = v[0]; x <= v[1]; x += (v[2] || 2)) o.push(x); return o; }
   return [v];
+}
+
+function shifted(acts, i, d) {
+  var out = acts.map(function (b) { return Object.assign({}, b); });
+  for (var j = i; j < out.length; j++) out[j].t += d;
+  return out;
+}
+
+// width in frames of the timing window around action i (later actions move with it)
+function windowOf(level, acts, i, needStars, cap) {
+  cap = cap || 120;
+  function ok(d) {
+    var a = shifted(acts, i, d);
+    if (a[i].t < 0) return false;
+    var r = Engine.simulate(level, a);
+    return r.state === 'won' && (!needStars || r.stars === level.stars.length);
+  }
+  var lo = 0, hi = 0;
+  while (lo > -cap && ok(lo - 1)) lo--;
+  while (hi < cap && ok(hi + 1)) hi++;
+  return { lo: lo, hi: hi, width: hi - lo + 1 };
 }
 
 function search(level) {
@@ -33,7 +68,7 @@ function search(level) {
       idx[i] = rem % axes[i].length; rem = Math.floor(rem / axes[i].length);
       var a = Object.assign({}, tmpl[i]); a.t = axes[i][idx[i]]; acts.push(a);
     }
-    // keep action order: each timed action must not precede the previous one
+    // keep action order
     var ok = true;
     for (var j = 1; j < acts.length; j++) if (acts[j].t < acts[j - 1].t) ok = false;
     if (!ok) continue;
@@ -42,10 +77,9 @@ function search(level) {
     if (r.state === 'won' && (!level.stars || r.stars === level.stars.length)) wins.push({ acts: acts, key: idx.slice(), res: r });
   }
   if (!wins.length) return null;
-  // pick the most robust win: most winning neighbours on the grid
+  // shortlist by winning neighbours on the grid, then measure real windows
   var set = {};
   wins.forEach(function (w) { set[w.key.join(',')] = true; });
-  var best = null, bestScore = -1;
   wins.forEach(function (w) {
     var s = 0;
     for (var i = 0; i < w.key.length; i++) {
@@ -55,39 +89,84 @@ function search(level) {
         if (set[k.join(',')]) s++;
       }
     }
-    if (s > bestScore) { bestScore = s; best = w; }
+    w.score = s;
+  });
+  wins.sort(function (a, b) { return b.score - a.score; });
+  var best = null;
+  wins.slice(0, 16).forEach(function (w) {
+    var ws = w.acts.map(function (a, i) { return windowOf(level, w.acts, i, !!level.stars, 45); });
+    // centre each action in its window so early and late mistakes are equally forgiven
+    var centred = w.acts.map(function (a) { return Object.assign({}, a); });
+    for (var i = 0; i < ws.length; i++) {
+      var shift = Math.round((ws[i].lo + ws[i].hi) / 2);
+      if (shift) { centred = shifted(centred, i, shift); }
+    }
+    var cr = Engine.simulate(level, centred);
+    if (cr.state === 'won' && (!level.stars || cr.stars === level.stars.length)) w.acts = centred, w.res = cr;
+    w.minWin = Math.min.apply(null, w.acts.map(function (a, i) { return windowOf(level, w.acts, i, !!level.stars, 45).width; }));
+    if (!best || w.minWin > best.minWin) best = w;
   });
   best.count = wins.length;
-  best.score = bestScore;
   return best;
 }
 
-function placeStars(level, res, fracs, acts) {
-  // only use the part of the path after the player's first move
+function distToPath(px, py, pts) {
+  var best = 1e9;
+  for (var i = 1; i < pts.length; i++) {
+    var ax = pts[i - 1][0], ay = pts[i - 1][1], bx = pts[i][0], by = pts[i][1];
+    var dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy;
+    var t = l ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l)) : 0;
+    var ex = ax + dx * t - px, ey = ay + dy * t - py, d = ex * ex + ey * ey;
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
+}
+
+function placeStars(level, acts, fracs) {
+  var nominal = Engine.simulate(level, acts, 1500, 1).path;
+  // paths the berry takes when each move is a bit early or late
+  var others = [];
+  acts.forEach(function (a, i) {
+    var w = windowOf(level, acts, i, false, 30);
+    var s = Math.max(2, Math.min(7, Math.floor((w.width - 1) / 3)));
+    [-s, s].forEach(function (d) {
+      var r = Engine.simulate(level, shifted(acts, i, d), 1500, 1);
+      if (r.state === 'won') others.push(r.path);
+    });
+  });
+  var idle = Engine.simulate(level, [], 1500, 2).path;
   var t0 = acts.length ? acts[0].t + 8 : 0;
-  var p = res.path.filter(function (q) { return q[2] >= t0; });
-  if (p.length < 3) p = res.path;
-  // keep fireflies away from where the berry goes if the player does nothing
-  var idle = Engine.simulate(level, []).path;
-  function free(q) {
+  var p = nominal.filter(function (q) { return q[2] >= t0; });
+  if (p.length < 3) p = nominal;
+  function good(q) {
     if (q[1] < 100 || q[0] < 20 || q[0] > 380) return false;
-    for (var i = 0; i < idle.length; i++) {
-      var dx = idle[i][0] - q[0], dy = idle[i][1] - q[1];
-      if (dx * dx + dy * dy < 48 * 48) return false;
-    }
+    var gx = q[0] - level.goal.x, gy = q[1] - level.goal.y;
+    if (gx * gx + gy * gy < 70 * 70) return false;                      // not inside the bird's mouth
+    if (distToPath(q[0], q[1], idle) < 48) return false;               // not free if you do nothing
+    for (var i = 0; i < others.length; i++) if (distToPath(q[0], q[1], others[i]) > CATCH) return false;
     return true;
   }
-  var used = {};
-  return fracs.map(function (f) {
-    var want = Math.round(f * (p.length - 1)), pick = want;
-    for (var d = 0; d < p.length; d++) {
+  var chosen = [];
+  function farFromChosen(q) {
+    return chosen.every(function (c) { var dx = c.x - q[0], dy = c.y - q[1]; return dx * dx + dy * dy > 60 * 60; });
+  }
+  fracs.forEach(function (f) {
+    var want = Math.round(f * (p.length - 1)), pick = -1;
+    for (var d = 0; d < p.length && pick < 0; d++) {
       var a = want + d, b = want - d;
-      if (a < p.length && !used[a] && free(p[a])) { pick = a; break; }
-      if (b >= 0 && !used[b] && free(p[b])) { pick = b; break; }
+      if (a < p.length && good(p[a]) && farFromChosen(p[a])) pick = a;
+      else if (b >= 0 && good(p[b]) && farFromChosen(p[b])) pick = b;
     }
-    used[pick] = 1;
-    return { x: p[pick][0], y: p[pick][1] };
+    if (pick < 0) { // fall back: any point on the path that isn't on the idle path
+      for (var e = 0; e < p.length && pick < 0; e++) {
+        var q = p[(want + e) % p.length];
+        if (q[1] >= 100 && distToPath(q[0], q[1], idle) >= 48 && farFromChosen(q)) pick = (want + e) % p.length;
+      }
+    }
+    if (pick < 0) pick = want;
+    chosen.push({ x: p[pick][0], y: p[pick][1] });
   });
+  return chosen;
 }
 
 var only = process.argv[2] ? parseInt(process.argv[2], 10) : 0;
@@ -103,17 +182,24 @@ src.forEach(function (lv, n) {
     console.log('#' + num + ' ' + lv.name + ': NO WIN FOUND (' + (Date.now() - t0) + 'ms) closest ' + JSON.stringify(search.miss));
     failed++; out.push(null); return;
   }
-  if (!lv.stars) level.stars = placeStars(level, best.res, lv.starAt || [0.25, 0.5, 0.78], best.acts);
+  if (!lv.stars) level.stars = placeStars(level, best.acts, lv.starAt || [0.25, 0.5, 0.78]);
   var check = Engine.simulate(level, best.acts);
-  var lazy = Engine.simulate(level, (level.solve || []).map(function (a) { var b = Object.assign({}, a); b.t = 0; return b; }));
+  var winW = best.acts.map(function (a, i) { return windowOf(level, best.acts, i, false).width; });
+  var starW = best.acts.map(function (a, i) { return windowOf(level, best.acts, i, true).width; });
+  var idle = Engine.simulate(level, []);
   level.solution = best.acts;
   delete level.solve;
   var line = '#' + num + ' ' + lv.name + ': ' + check.state + ' stars=' + check.stars +
-    ' wins=' + best.count + ' robust=' + best.score + ' acts=' + JSON.stringify(best.acts.map(function (a) { return a.t; })) +
-    ' | all-at-once: ' + lazy.state + '/' + lazy.stars + ' (' + (Date.now() - t0) + 'ms)';
-  if (check.state !== 'won' || check.stars !== 3) { line += '  <-- CHECK'; failed++; }
+    ' acts=' + JSON.stringify(best.acts.map(function (a) { return a.t; })) +
+    ' windows win/3stars=' + winW.map(function (w, i) { return w + '/' + starW[i]; }).join(' ') +
+    ' (' + (Date.now() - t0) + 'ms)';
+  var problems = [];
+  if (check.state !== 'won' || check.stars !== 3) problems.push('solution fails');
+  if (Math.min.apply(null, winW) < MIN_WIN) problems.push('too tight to win');
+  if (Math.min.apply(null, starW) < MIN_STARS) problems.push('fireflies too tight');
+  if (idle.state === 'won' || idle.stars > 0) problems.push('doing nothing wins/scores');
+  if (problems.length) { line += '  <-- ' + problems.join(', '); failed++; }
   console.log(line);
-  if (only && process.argv[3]) console.log(JSON.stringify(best.res.path));
   out.push(level);
 });
 

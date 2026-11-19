@@ -312,7 +312,8 @@
   };
 
   // run a scripted solution: [{t: frame, cut: i} | {t, pop: true} | {t, blow: i}]
-  function simulate(level, actions, maxFrames) {
+  function simulate(level, actions, maxFrames, every) {
+    every = every || 5;
     var w = new World(level);
     var acts = (actions || []).slice().sort(function (a, b) { return a.t - b.t; });
     var ai = 0, path = [], near = 1e9, nearAt = null;
@@ -327,7 +328,7 @@
       w.step();
       var gx = w.berry.x - w.goal.x, gy = w.berry.y - w.goal.y, gd = Math.sqrt(gx * gx + gy * gy);
       if (gd < near) { near = gd; nearAt = [Math.round(w.berry.x), Math.round(w.berry.y), w.frame]; }
-      if (w.frame % 5 === 0) path.push([Math.round(w.berry.x), Math.round(w.berry.y), w.frame]);
+      if (w.frame % every === 0) path.push([Math.round(w.berry.x), Math.round(w.berry.y), w.frame]);
     }
     return { state: w.state, reason: w.loseReason, stars: w.collected, frames: w.frame, path: path, near: near, nearAt: nearAt, world: w };
   }

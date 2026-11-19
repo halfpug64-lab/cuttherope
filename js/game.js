@@ -76,16 +76,20 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
-  function startLevel(i) {
+  var demo = null; // when set, the level's stored solution plays itself
+
+  function startLevel(i, watch) {
     levelIndex = i;
     world = new E.World(LEVELS[i]);
+    demo = watch ? { acts: LEVELS[i].solution.slice(), next: 0 } : null;
     endTimer = 0; trail = []; particles = []; flyStars = [];
     bird.happy = 0; bird.sad = 0;
     $('lvl-num').textContent = (i + 1);
     $('lvl-name').textContent = LEVELS[i].name;
     updateHudStars();
     var hint = $('hint');
-    if (LEVELS[i].hint) { hint.textContent = LEVELS[i].hint; hint.classList.add('show'); }
+    if (watch) { hint.textContent = 'Watch: this is one way to solve it'; hint.classList.add('show'); }
+    else if (LEVELS[i].hint) { hint.textContent = LEVELS[i].hint; hint.classList.add('show'); }
     else hint.classList.remove('show');
     show('play');
   }
@@ -133,9 +137,11 @@
   function finish() {
     var won = world.state === 'won';
     var n = world.collected;
-    if (won && n > bestOf(levelIndex)) { save.best[levelIndex] = n; persist(); }
+    var watched = !!demo;
+    if (won && !watched && n > bestOf(levelIndex)) { save.best[levelIndex] = n; persist(); }
     $('result-title').textContent = won ? ['Yum!', 'Tasty!', 'Delicious!', 'Perfect!'][n] : (world.loseReason === 'spikes' ? 'Ouch!' : 'Missed!');
-    $('result-sub').textContent = won ? (n === 3 ? 'All three fireflies!' : n + ' of 3 fireflies') : 'Pip is still hungry.';
+    $('result-sub').textContent = watched ? 'That was one way to do it. Your turn!' :
+      won ? (n === 3 ? 'All three fireflies!' : n + ' of 3 fireflies') : 'Pip is still hungry.';
     var rs = document.querySelectorAll('#result-stars .fly');
     for (var i = 0; i < rs.length; i++) {
       rs[i].classList.remove('on');
@@ -155,7 +161,7 @@
     return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
   }
   canvas.addEventListener('pointerdown', function (e) {
-    if (!world || world.state !== 'play') return;
+    if (!world || world.state !== 'play' || demo) return;
     canvas.setPointerCapture(e.pointerId);
     var p = toWorld(e);
     pointer.down = true; pointer.x = p.x; pointer.y = p.y;
@@ -178,6 +184,8 @@
   $('btn-levels').onclick = function () { show('levels'); };
   $('btn-back').onclick = function () { show('menu'); };
   $('btn-restart').onclick = function () { startLevel(levelIndex); };
+  $('btn-watch').onclick = function () { startLevel(levelIndex, true); };
+  $('btn-res-watch').onclick = function () { startLevel(levelIndex, true); };
   $('btn-retry').onclick = function () { startLevel(levelIndex); };
   $('btn-next').onclick = function () { startLevel(levelIndex + 1); };
   $('btn-done').onclick = function () { show('levels'); };
@@ -513,6 +521,25 @@
     }
   }
 
+  // plays the stored solution, showing a swipe or a tap for each move
+  function playDemo() {
+    while (demo.next < demo.acts.length && demo.acts[demo.next].t <= world.frame) {
+      var a = demo.acts[demo.next++];
+      if (a.cut !== undefined) {
+        var r = world.ropes[a.cut];
+        if (r) {
+          var m = r.nodes[Math.floor(r.links.length / 2)];
+          trail.push({ x: m.x - 30, y: m.y - 22, life: 1, start: true });
+          trail.push({ x: m.x, y: m.y, life: 1 });
+          trail.push({ x: m.x + 30, y: m.y + 22, life: 1 });
+        }
+        world.cutRope(a.cut);
+      }
+      if (a.pop) { burst(world.berry.x, world.berry.y, '#ffffff', 6, 1.5); world.pop(); }
+      if (a.blow !== undefined) world.blow(a.blow);
+    }
+  }
+
   // ---------- loop ----------
   var last = performance.now(), acc = 0, STEP = 1000 / 60;
   function loop(now) {
@@ -520,6 +547,7 @@
     while (acc >= STEP) {
       acc -= STEP; time++;
       if (world && $('menu').classList.contains('hidden') && $('levels').classList.contains('hidden')) {
+        if (demo && world.state === 'play') playDemo();
         if (world.state === 'play') world.step();
         handleEvents();
         if (world.state !== 'play') {
@@ -540,7 +568,7 @@
   }
 
   // small hook for automated screenshots/tests
-  window.__snip = { start: function (i) { startLevel(i); }, world: function () { return world; } };
+  window.__snip = { start: function (i, watch) { startLevel(i, watch); }, world: function () { return world; } };
 
   resize();
   // menu background shows level 1 idle
